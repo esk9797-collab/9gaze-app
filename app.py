@@ -1,110 +1,94 @@
 import streamlit as st
 import numpy as np
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 import matplotlib.pyplot as plt
 from PIL import Image
 import io
-import time
+import os
+import urllib.request
 
 # 페이지 설정
 st.set_page_config(page_title="9-Gaze Clinical Pro", layout="centered")
+st.title("👁️ 9-Gaze 정밀 분석기 (일괄 업로드)")
 
-st.title("👁️ 9-Gaze 정밀 촬영 시스템")
+# AI 모델 로드 (캐싱하여 속도 최적화)
+@st.cache_resource
+def load_model():
+    model_path = 'face_landmarker.task'
+    if not os.path.exists(model_path):
+        url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+        urllib.request.urlretrieve(url, model_path)
+    base_options = python.BaseOptions(model_asset_path=model_path)
+    options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
+    return vision.FaceLandmarker.create_from_options(options)
 
-# --- 세션 상태 초기화 ---
-if 'photos' not in st.session_state:
-    st.session_state.photos = [None] * 9
+detector = load_model()
 
-if 'current_step' not in st.session_state:
-    st.session_state.current_step = 0
+# 안내 문구
+st.info("📸 기본 카메라 앱으로 정해진 순서대로 9장의 사진을 찍은 후, 아래에 한 번에 업로드해주세요.\n\n**(순서: 정면 ➔ 좌 ➔ 좌상 ➔ 상 ➔ 우상 ➔ 우 ➔ 우하 ➔ 하 ➔ 좌하)**")
 
-shooting_order = [
-    "1. 정면", "2. 좌측", "3. 좌상측",
-    "4. 상측", "5. 우상측", "6. 우측",
-    "7. 우하측", "8. 하측", "9. 좌하측"
-]
+# 다중 파일 업로더
+uploaded_files = st.file_uploader("사진 9장 일괄 선택", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
 
-grid_labels = [
-    "Up-Right", "Up", "Up-Left",
-    "Right", "Center", "Left",
-    "Down-Right", "Down", "Down-Left"
-]
+if uploaded_files:
+    if len(uploaded_files) != 9:
+        st.error(f"❌ 현재 {len(uploaded_files)}장이 선택되었습니다. 정확히 9장을 업로드해주세요.")
+    else:
+        with st.spinner("⏳ AI가 눈 위치를 추적하여 정밀 크롭을 진행 중입니다..."):
+            # 💡 시간(파일명) 순서대로 정렬 (스마트폰 갤러리 선택 순서 꼬임 방지)
+            sorted_files = sorted(uploaded_files, key=lambda x: x.name)
 
-mapping_indices = [4, 5, 2, 1, 0, 3, 6, 7, 8]
+            shooting_order = ["Center", "Left", "Up-Left", "Up", "Up-Right", "Right", "Down-Right", "Down", "Down-Left"]
+            grid_order = ["Up-Right", "Up", "Up-Left", "Right", "Center", "Left", "Down-Right", "Down", "Down-Left"]
 
-step = st.session_state.current_step
+            mapped_images = {}
 
-# --- 촬영 UI ---
-if step < 9:
-    st.subheader(f"📍 단계 ({step+1}/9): {shooting_order[step]}")
+            # 이미지 분석 및 크롭
+            for i, file in enumerate(sorted_files):
+                img = Image.open(file).convert('RGB')
+                rgb_image = np.array(img)
+                h, w = rgb_image.shape[:2]
 
-    st.warning("📱 전면 카메라로 전환 후 촬영하세요.")
-    st.error("⚠️ 양쪽 눈이 화면의 '중앙보다 약간 위'에 오도록 맞춰주세요.")
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_image)
+                res = detector.detect(mp_image)
 
-    # ✅ key 고정 (중요)
-    cam_photo = st.camera_input(
-        f"{shooting_order[step]} 촬영",
-        key=f"cam_step_{step}"
-    )
+                if res.face_landmarks:
+                    lm = res.face_landmarks[0]
+                    # 선생님의 원본 정밀 알고리즘
+                    cx = (lm[33].x + lm[263].x) / 2 * w
+                    cy = (lm[33].y + lm[263].y) / 2 * h
+                    ew = abs(lm[263].x - lm[33].x) * w
+                    cw, ch = int(ew * 1.6), int(ew * 1.6 * 0.4)
+                    
+                    xmin, xmax = max(0, int(cx - cw/2)), min(w, int(cx + cw/2))
+                    ymin, ymax = max(0, int(cy - ch/2)), min(h, int(cy + ch/2))
 
-    if cam_photo is not None:
-        img = Image.open(cam_photo).convert('RGB')
-        img_np = np.array(img)
-        h, w = img_np.shape[:2]
+                    crop = rgb_image[ymin:ymax, xmin:xmax]
+                else:
+                    st.warning(f"⚠️ '{file.name}'에서 눈을 찾지 못해 임의의 비율로 자릅니다.")
+                    cx, cy = w // 2, h // 2
+                    cw, ch = int(w * 0.8), int(w * 0.8 * 0.4)
+                    xmin, xmax = max(0, int(cx - cw/2)), min(w, int(cx + cw/2))
+                    ymin, ymax = max(0, int(cy - ch/2)), min(h, int(cy + ch/2))
+                    crop = rgb_image[ymin:ymax, xmin:xmax]
 
-        # 눈 중심 crop
-        left, right = int(w * 0.10), int(w * 0.90)
-        top, bottom = int(h * 0.25), int(h * 0.45)
+                mapped_images[shooting_order[i]] = crop
 
-        crop = img_np[top:bottom, left:right]
+            st.success("🎉 분석 완료! 대한안과학회(JKOS) 논문 등재 규격에 맞춘 9-Gaze 격자입니다.")
 
-        target_pos = mapping_indices.index(step)
-        st.session_state.photos[target_pos] = crop
+            # 3x3 표 출력
+            fig, axes = plt.subplots(3, 3, figsize=(15, 9))
+            for i, pos in enumerate(grid_order):
+                axes[divmod(i, 3)].imshow(mapped_images[pos])
+                axes[divmod(i, 3)].set_title(pos, fontsize=16, fontweight='bold')
+                axes[divmod(i, 3)].axis('off')
 
-        # ✅ 안정적인 다음 단계 이동
-        time.sleep(0.2)
-        st.session_state.current_step += 1
-        st.rerun()
+            plt.tight_layout()
+            st.pyplot(fig)
 
-    # 이전 단계 버튼
-    if step > 0:
-        if st.button("⬅️ 이전 단계 다시 찍기"):
-            st.session_state.current_step -= 1
-            prev_target_pos = mapping_indices.index(st.session_state.current_step)
-            st.session_state.photos[prev_target_pos] = None
-            st.rerun()
-
-# --- 결과 출력 UI ---
-else:
-    st.success("🎉 촬영 완료! 결과물을 확인하세요.")
-
-    fig, axes = plt.subplots(3, 3, figsize=(15, 9))
-    plt.subplots_adjust(wspace=0.05, hspace=0.3)
-
-    for i, label in enumerate(grid_labels):
-        ax = axes[i // 3, i % 3]
-
-        if st.session_state.photos[i] is not None:
-            ax.imshow(st.session_state.photos[i])
-
-        ax.set_title(label, fontsize=12, fontweight='bold')
-        ax.axis('off')
-
-    st.pyplot(fig)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=300, bbox_inches='tight')
-        st.download_button(
-            "📥 결과 저장 (PNG)",
-            buf.getvalue(),
-            "9gaze_result.png",
-            "image/png"
-        )
-
-    with col2:
-        if st.button("🔄 전체 새로고침 (데이터 삭제)"):
-            st.session_state.photos = [None] * 9
-            st.session_state.current_step = 0
-            st.rerun()
+            # 다운로드
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=300)
+            st.download_button("📥 논문용 격자 저장 (PNG)", buf.getvalue(), "9gaze_result.png", "image/png")
