@@ -5,3 +5,5 @@ libsm6
 libxext6
 libxrender1
 mesa-utils
+libgles2
+libegl1
