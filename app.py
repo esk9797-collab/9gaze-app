@@ -4,16 +4,16 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import matplotlib.pyplot as plt
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 import os
 import urllib.request
 
 # 페이지 설정
 st.set_page_config(page_title="9-Gaze Precision AI", layout="wide")
-st.title("👁️ 9-Gaze 정밀 AI 분석기 (MediaPipe)")
+st.title("👁️ 9-Gaze 정밀 AI 분석기 (완전판)")
 
-# 1. AI 엔진 설정 및 모델 다운로드
+# 1. AI 엔진 설정 및 모델 다운로드 (캐시 사용으로 속도 향상)
 @st.cache_resource
 def load_ai_model():
     model_path = 'face_landmarker.task'
@@ -36,8 +36,8 @@ if uploaded_files:
     if len(uploaded_files) != 9:
         st.error(f"❌ 현재 {len(uploaded_files)}장이 선택되었습니다. 정확히 9장을 업로드해주세요.")
     else:
-        with st.spinner("⏳ MediaPipe AI가 눈 랜드마크를 추적하여 정밀 크롭을 진행 중입니다..."):
-            # 💡 스마트폰에서 찍힌 시간 순서대로 정렬 (파일명 오름차순)
+        with st.spinner("⏳ AI가 사진의 회전을 바로잡고 눈 랜드마크를 정밀 추적 중입니다..."):
+            # 스마트폰에서 찍힌 시간(파일명) 순서대로 정렬
             sorted_files = sorted(uploaded_files, key=lambda x: x.name)
 
             # 선생님이 지정하신 촬영 순서
@@ -48,12 +48,15 @@ if uploaded_files:
 
             mapped_images = {}
 
-            # 3. AI 이미지 분석 및 크롭 로직 (Colab과 100% 동일)
+            # 3. AI 이미지 분석 및 크롭 로직
             for i, file in enumerate(sorted_files):
                 if i >= 9: break
                 
-                # 이미지를 읽어서 Numpy 배열로 변환
-                img = Image.open(file).convert('RGB')
+                # 🔥 [핵심 수정] 스마트폰 사진의 EXIF 회전 메타데이터를 읽어 똑바로 세움
+                img = Image.open(file)
+                img = ImageOps.exif_transpose(img) # 가로로 누운 사진을 세로로 복원!
+                img = img.convert('RGB')
+                
                 rgb_image = np.array(img)
                 h, w = rgb_image.shape[:2]
 
@@ -62,7 +65,7 @@ if uploaded_files:
 
                 if res.face_landmarks:
                     lm = res.face_landmarks[0]
-                    # 💡 논문용 정밀 고정 크롭 (양 눈끝 33번, 263번 랜드마크 기준)
+                    # 논문용 정밀 고정 크롭 (양 눈끝 33번, 263번 랜드마크 기준)
                     cx = (lm[33].x + lm[263].x) / 2 * w
                     cy = (lm[33].y + lm[263].y) / 2 * h
                     ew = abs(lm[263].x - lm[33].x) * w
@@ -74,6 +77,7 @@ if uploaded_files:
                     crop = rgb_image[ymin:ymax, xmin:xmax]
                 else:
                     st.warning(f"⚠️ '{file.name}'에서 눈을 찾지 못해 임의의 비율로 자릅니다.")
+                    # 얼굴을 못 찾았을 경우 화면 가운데 자르기
                     cx, cy = w // 2, h // 2
                     cw, ch = int(w * 0.8), int(w * 0.8 * 0.4)
                     xmin, xmax = max(0, int(cx - cw/2)), min(w, int(cx + cw/2))
@@ -86,17 +90,17 @@ if uploaded_files:
             st.success("🎉 분석 완료! 최종 9-Gaze 논문용 격자입니다.")
 
             # 4. 3x3 격자 출력
-            fig, axes = plt.subplots(3, 3, figsize=(12, 7))
+            fig, axes = plt.subplots(3, 3, figsize=(15, 9))
             plt.subplots_adjust(wspace=0.1, hspace=0.3)
             
             for i, pos in enumerate(grid_order):
                 axes[divmod(i, 3)].imshow(mapped_images[pos])
-                axes[divmod(i, 3)].set_title(pos, fontsize=14, fontweight='bold')
+                axes[divmod(i, 3)].set_title(pos, fontsize=16, fontweight='bold')
                 axes[divmod(i, 3)].axis('off')
 
             st.pyplot(fig)
 
-            # 다운로드 버튼
+            # 5. 다운로드 버튼
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=300, bbox_inches='tight')
             st.download_button("📥 논문용 사진 저장 (PNG)", buf.getvalue(), "9gaze_result.png", "image/png")
