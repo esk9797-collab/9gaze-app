@@ -1,4 +1,6 @@
 streamlit
 numpy
+mediapipe
 matplotlib
 Pillow
+opencv-python-headless
